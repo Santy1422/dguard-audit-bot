@@ -1,0 +1,310 @@
+name: 🔍 DGuard External Repository Monitor
+
+on:
+  repository_dispatch:
+    types: [dguard-pr-opened, dguard-pr-synchronized]
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'Repository to analyze (format: owner/repo)'
+        required: true
+        type: string
+      pr_number:
+        description: 'PR number to analyze'
+        required: true
+        type: string
+      action:
+        description: 'Action type (opened, synchronized, etc.)'
+        required: false
+        default: 'opened'
+        type: string
+
+env:
+  NODE_VERSION: '18'
+
+jobs:
+  analyze-external-pr:
+    name: Analyze DGuard Repository PR
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      
+    steps:
+      - name: 📥 Checkout audit bot
+        uses: actions/checkout@v4
+        
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          
+      - name: 📦 Install dependencies
+        run: npm ci
+        
+      - name: 🔑 Configure GitHub credentials
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Configuring GitHub access for external repositories"
+          echo "Target repository: ${{ github.event.client_payload.repository || github.event.inputs.repository }}"
+          echo "PR number: ${{ github.event.client_payload.pr_number || github.event.inputs.pr_number }}"
+          
+      - name: 📚 Clone target repository
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          TARGET_REPO: ${{ github.event.client_payload.repository || github.event.inputs.repository }}
+          PR_NUMBER: ${{ github.event.client_payload.pr_number || github.event.inputs.pr_number }}
+        run: |
+          echo "Cloning repository: $TARGET_REPO"
+          mkdir -p external-analysis
+          cd external-analysis
+          
+          # Clone the target repository
+          gh repo clone $TARGET_REPO target-repo
+          cd target-repo
+          
+          # Fetch PR information
+          gh pr checkout $PR_NUMBER || echo "Could not checkout PR, analyzing main branch"
+          
+          echo "Repository cloned successfully"
+          ls -la
+          
+      - name: 🔍 Run DGuard audit on external repository
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_REPO: ${{ github.event.client_payload.repository || github.event.inputs.repository }}
+          PR_NUMBER: ${{ github.event.client_payload.pr_number || github.event.inputs.pr_number }}
+          NODE_ENV: production
+        run: |
+          echo "Running DGuard audit on external repository..."
+          
+          # Determine repository type and configure analysis accordingly
+          REPO_NAME=$(echo "$TARGET_REPO" | cut -d'/' -f2)
+          
+          case "$REPO_NAME" in
+            "DGuardAPI"|"DGuard-Phishing-API"|"DGuard-URL-Checker")
+              echo "Analyzing backend repository: $REPO_NAME"
+              npm run audit -- \
+                --backend ./external-analysis/target-repo \
+                --format all \
+                --github \
+                --target-repo "$TARGET_REPO" \
+                --pr-number "$PR_NUMBER" \
+                --ci
+              ;;
+            "DGuard")
+              echo "Analyzing frontend repository: $REPO_NAME"
+              npm run audit -- \
+                --frontend ./external-analysis/target-repo \
+                --format all \
+                --github \
+                --target-repo "$TARGET_REPO" \
+                --pr-number "$PR_NUMBER" \
+                --ci
+              ;;
+            *)
+              echo "Analyzing general repository: $REPO_NAME"
+              npm run audit -- \
+                --backend ./external-analysis/target-repo \
+                --frontend ./external-analysis/target-repo \
+                --format all \
+                --github \
+                --target-repo "$TARGET_REPO" \
+                --pr-number "$PR_NUMBER" \
+                --ci
+              ;;
+          esac
+          
+      - name: 📝 Post audit results to external PR
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          TARGET_REPO: ${{ github.event.client_payload.repository || github.event.inputs.repository }}
+          PR_NUMBER: ${{ github.event.client_payload.pr_number || github.event.inputs.pr_number }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            const fs = require('fs');
+            const [owner, repo] = process.env.TARGET_REPO.split('/');
+            const prNumber = parseInt(process.env.PR_NUMBER);
+            
+            console.log(`Posting results to ${owner}/${repo} PR #${prNumber}`);
+            
+            // Read audit report
+            let auditReport = {};
+            try {
+              const reportPath = 'reports/audit-report.json';
+              if (fs.existsSync(reportPath)) {
+                auditReport = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+              }
+            } catch (error) {
+              console.log('Could not read audit report:', error.message);
+              auditReport = {
+                summary: { issues: { total: 0, critical: 0, high: 0 } },
+                error: 'Analysis failed - check audit bot logs'
+              };
+            }
+            
+            // Create comment body for external repository
+            const createExternalCommentBody = (report) => {
+              const summary = report.summary || {};
+              const issues = summary.issues || {};
+              const criticalCount = issues.critical || 0;
+              const highCount = issues.high || 0;
+              const totalIssues = issues.total || 0;
+              
+              let statusEmoji = '✅';
+              let statusText = 'PASSED';
+              let alertLevel = '';
+              
+              if (criticalCount > 0) {
+                statusEmoji = '🔴';
+                statusText = 'CRITICAL ISSUES FOUND';
+                alertLevel = '> **⚠️ CRITICAL**: This PR introduces critical security or functionality issues that must be addressed before merging.';
+              } else if (highCount > 0) {
+                statusEmoji = '🟠';
+                statusText = 'HIGH PRIORITY ISSUES';
+                alertLevel = '> **⚠️ WARNING**: This PR has high priority issues that should be reviewed.';
+              } else if (totalIssues > 0) {
+                statusEmoji = '🟡';
+                statusText = 'MINOR ISSUES DETECTED';
+              }
+              
+              return `## ${statusEmoji} DGuard Ultra Audit Results
+            
+            ${alertLevel}
+            
+            ### 📊 Summary
+            
+            | Metric | Value |
+            |--------|-------|
+            | **Overall Status** | ${statusEmoji} ${statusText} |
+            | **Critical Issues** | ${criticalCount} |
+            | **High Priority** | ${highCount} |
+            | **Total Issues** | ${totalIssues} |
+            | **Repository** | ${owner}/${repo} |
+            
+            ### 🔍 Analysis Details
+            
+            ${criticalCount > 0 ? `
+            ### 🚨 Critical Issues Requiring Immediate Attention
+            
+            ${(report.issues || [])
+              .filter(issue => issue.severity === 'CRITICAL')
+              .slice(0, 5)
+              .map(issue => `- **${issue.type}**: ${issue.message}`)
+              .join('\\n') || 'Check detailed report for critical issues'}
+            ` : ''}
+            
+            ${highCount > 0 ? `
+            ### 🟠 High Priority Issues
+            
+            ${(report.issues || [])
+              .filter(issue => issue.severity === 'HIGH')
+              .slice(0, 3)
+              .map(issue => `- **${issue.type}**: ${issue.message}`)
+              .join('\\n') || 'Check detailed report for high priority issues'}
+            ` : ''}
+            
+            ### 💡 Recommendations
+            
+            ${criticalCount > 0 || highCount > 0 ? 
+              '- Review and fix critical/high priority issues before merging\\n' : 
+              '- Code looks good! Consider the minor suggestions if any\\n'}
+            - View detailed analysis: [DGuard Audit Bot Results](https://github.com/Santy1422/dguard-audit-bot/actions)
+            
+            ---
+            
+            🤖 **Automated analysis by [DGuard Ultra Audit Bot](https://github.com/Santy1422/dguard-audit-bot)**
+            
+            *This comment will be updated automatically as you push new changes.*`;
+            };
+            
+            try {
+              // Find existing audit comment
+              const comments = await github.rest.issues.listComments({
+                owner: owner,
+                repo: repo,
+                issue_number: prNumber
+              });
+              
+              const existingComment = comments.data.find(comment => 
+                comment.body.includes('DGuard Ultra Audit Results')
+              );
+              
+              const commentBody = createExternalCommentBody(auditReport);
+              
+              if (existingComment) {
+                // Update existing comment
+                await github.rest.issues.updateComment({
+                  owner: owner,
+                  repo: repo,
+                  comment_id: existingComment.id,
+                  body: commentBody
+                });
+                console.log(`Updated existing audit comment in ${owner}/${repo} PR #${prNumber}`);
+              } else {
+                // Create new comment
+                await github.rest.issues.createComment({
+                  owner: owner,
+                  repo: repo,
+                  issue_number: prNumber,
+                  body: commentBody
+                });
+                console.log(`Created new audit comment in ${owner}/${repo} PR #${prNumber}`);
+              }
+              
+              // Set status check on the external repository
+              const prData = await github.rest.pulls.get({
+                owner: owner,
+                repo: repo,
+                pull_number: prNumber
+              });
+              
+              let state = 'success';
+              let description = 'No critical issues detected';
+              
+              if (criticalCount > 0) {
+                state = 'failure';
+                description = `${criticalCount} critical issues must be fixed`;
+              } else if (highCount > 5) {
+                state = 'failure';
+                description = `Too many high priority issues (${highCount})`;
+              } else if (highCount > 0) {
+                state = 'pending';
+                description = `${highCount} high priority issues detected`;
+              }
+              
+              await github.rest.repos.createCommitStatus({
+                owner: owner,
+                repo: repo,
+                sha: prData.data.head.sha,
+                state: state,
+                target_url: `https://github.com/Santy1422/dguard-audit-bot/actions`,
+                description: description,
+                context: 'DGuard Ultra Audit'
+              });
+              
+              console.log(`Set status check: ${state} - ${description}`);
+              
+            } catch (error) {
+              console.error('Error posting to external repository:', error);
+              // Don't fail the workflow if we can't post to external repo
+            }
+            
+      - name: 📈 Upload external analysis artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: external-audit-${{ github.event.client_payload.repository || github.event.inputs.repository }}-pr-${{ github.event.client_payload.pr_number || github.event.inputs.pr_number }}
+          path: |
+            reports/
+            logs/
+          retention-days: 30

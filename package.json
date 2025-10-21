@@ -26,6 +26,7 @@
     "dashboard:web": "node scripts/web-dashboard.js",
     "setup": "chmod +x scripts/setup.sh && ./scripts/setup.sh",
     "setup:github": "node scripts/github-setup.js",
+    "setup:dguard-repos": "node scripts/setup-webhooks.js",
     "setup:docker": "docker build -t dguard-audit-bot .",
     "setup:cloud": "node scripts/cloud-setup.js",
     "test": "jest",

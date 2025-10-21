@@ -46,12 +46,12 @@ export default {
     // Usuario o organización de GitHub
     owner: 'ai-sapira',
     
-    // Repositorios a clonar automáticamente (repositorios públicos para testing)
+    // Repositorios DGuard a clonar automáticamente (rutas exactas verificadas)
     repositories: {
-      teamsBot: 'sapira-teams-bot',    // Repositorio público para testing
-      restAI: 'rest_ai'                // Repositorio público para testing
-      // backend: 'DGuardAPI',         // Repositorio privado - requiere permisos
-      // frontend: 'DGuard',           // Repositorio privado - requiere permisos
+      backend: 'DGuardAPI',              // Backend principal DGuard
+      frontend: 'DGuard',                // Frontend principal DGuard
+      phishingAPI: 'DGuard-Phishing-API', // API de detección de phishing
+      urlChecker: 'DGuard-URL-Checker'   // Servicio de verificación de URLs
     },
     
     // Configuración avanzada por repositorio (opcional)
