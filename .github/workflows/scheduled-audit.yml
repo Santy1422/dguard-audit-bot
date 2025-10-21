@@ -7,9 +7,10 @@ on:
   workflow_dispatch:
 
 env:
-  BACKEND_REPO: 'santiagogarcia/DGuardAPI'
-  FRONTEND_REPO: 'santiagogarcia/DGuard'
-  DESIGN_SYSTEM_REPO: 'santiagogarcia/design-system'
+  BACKEND_REPO: 'ai-sapira/DGuardAPI'
+  FRONTEND_REPO: 'ai-sapira/DGuard'
+  PHISHING_API_REPO: 'ai-sapira/DGuard-Phishing-API'
+  URL_CHECKER_REPO: 'ai-sapira/DGuard-URL-Checker'
 
 jobs:
   scheduled-audit:
@@ -22,10 +23,11 @@ jobs:
     
     - name: 📥 Checkout Repositories
       run: |
-        # Clonar repositorios usando GitHub CLI
+        # Clonar repositorios DGuard usando GitHub CLI
         gh repo clone ${{ env.BACKEND_REPO }} projects/backend
         gh repo clone ${{ env.FRONTEND_REPO }} projects/frontend
-        gh repo clone ${{ env.DESIGN_SYSTEM_REPO }} projects/design-system || echo "Design system repo not available"
+        gh repo clone ${{ env.PHISHING_API_REPO }} projects/phishing-api || echo "Phishing API repo not available"
+        gh repo clone ${{ env.URL_CHECKER_REPO }} projects/url-checker || echo "URL Checker repo not available"
       env:
         GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
     
@@ -43,7 +45,8 @@ jobs:
         npm run audit -- \
           --backend ./projects/backend \
           --frontend ./projects/frontend \
-          --design-system ./projects/design-system \
+          --additional ./projects/phishing-api \
+          --additional ./projects/url-checker \
           --format all \
           --quiet
     
