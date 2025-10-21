@@ -1,0 +1,255 @@
+version: '3.8'
+
+services:
+  # Main audit service
+  dguard-audit:
+    build: 
+      context: .
+      target: production
+    container_name: dguard-audit-bot
+    restart: unless-stopped
+    
+    volumes:
+      # Mount project directories (read-only)
+      - ${BACKEND_PATH:-./projects/backend}:/app/projects/backend:ro
+      - ${FRONTEND_PATH:-./projects/frontend}:/app/projects/frontend:ro
+      - ${DESIGN_SYSTEM_PATH:-./projects/design-system}:/app/projects/design-system:ro
+      
+      # Persistent data
+      - audit-reports:/app/reports
+      - audit-cache:/app/.audit-cache
+      - audit-history:/app/.audit-history
+      - audit-logs:/app/logs
+      
+      # Custom configuration
+      - ${CONFIG_PATH:-./config}:/app/config:ro
+    
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - GH_PAT=${GH_PAT}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - TEAMS_WEBHOOK_URL=${TEAMS_WEBHOOK_URL}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
+      - EMAIL_USERNAME=${EMAIL_USERNAME}
+      - EMAIL_PASSWORD=${EMAIL_PASSWORD}
+      - AUDIT_SCHEDULE=${AUDIT_SCHEDULE:-0 */6 * * *}
+    
+    networks:
+      - dguard-network
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "npm", "run", "monitor:health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.1'
+
+  # Web dashboard service
+  dguard-dashboard:
+    build: 
+      context: .
+      target: production
+    container_name: dguard-dashboard
+    restart: unless-stopped
+    
+    ports:
+      - "${DASHBOARD_PORT:-3000}:3000"
+    
+    volumes:
+      - audit-reports:/app/reports:ro
+      - audit-logs:/app/logs:ro
+    
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - DASHBOARD_MODE=web
+    
+    networks:
+      - dguard-network
+    
+    depends_on:
+      dguard-audit:
+        condition: service_healthy
+    
+    command: npm run dashboard:web
+    
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.25'
+
+  # Scheduled audit runner
+  dguard-scheduler:
+    build: 
+      context: .
+      target: production
+    container_name: dguard-scheduler
+    restart: unless-stopped
+    
+    volumes:
+      - audit-reports:/app/reports
+      - audit-cache:/app/.audit-cache
+      - audit-history:/app/.audit-history
+      - audit-logs:/app/logs
+      - ${CONFIG_PATH:-./config}:/app/config:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - AUDIT_SCHEDULE=${AUDIT_SCHEDULE:-0 */6 * * *}
+      - CONTAINER_NAME=dguard-audit-bot
+    
+    networks:
+      - dguard-network
+    
+    depends_on:
+      dguard-audit:
+        condition: service_healthy
+    
+    command: >
+      sh -c "
+        echo 'Setting up cron job for audit scheduling...'
+        echo '${AUDIT_SCHEDULE:-0 */6 * * *} docker exec dguard-audit-bot npm run audit' | crontab -
+        echo 'Starting cron daemon...'
+        crond -f -l 2
+      "
+
+  # Monitoring service (optional)
+  dguard-monitor:
+    image: prom/prometheus:latest
+    container_name: dguard-monitor
+    restart: unless-stopped
+    
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    
+    networks:
+      - dguard-network
+    
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+
+  # Grafana dashboard (optional)
+  dguard-grafana:
+    image: grafana/grafana:latest
+    container_name: dguard-grafana
+    restart: unless-stopped
+    
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    
+    networks:
+      - dguard-network
+    
+    depends_on:
+      - dguard-monitor
+
+  # Redis cache (optional, for distributed caching)
+  dguard-redis:
+    image: redis:7-alpine
+    container_name: dguard-redis
+    restart: unless-stopped
+    
+    volumes:
+      - redis-data:/data
+    
+    networks:
+      - dguard-network
+    
+    command: redis-server --appendonly yes
+    
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.1'
+
+  # Nginx reverse proxy (optional)
+  dguard-proxy:
+    image: nginx:alpine
+    container_name: dguard-proxy
+    restart: unless-stopped
+    
+    ports:
+      - "${PROXY_PORT:-80}:80"
+      - "${PROXY_SSL_PORT:-443}:443"
+    
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - nginx-logs:/var/log/nginx
+    
+    networks:
+      - dguard-network
+    
+    depends_on:
+      - dguard-dashboard
+      - dguard-grafana
+
+networks:
+  dguard-network:
+    driver: bridge
+    name: dguard-audit-network
+
+volumes:
+  audit-reports:
+    driver: local
+    name: dguard-audit-reports
+  
+  audit-cache:
+    driver: local
+    name: dguard-audit-cache
+  
+  audit-history:
+    driver: local
+    name: dguard-audit-history
+  
+  audit-logs:
+    driver: local
+    name: dguard-audit-logs
+  
+  prometheus-data:
+    driver: local
+    name: dguard-prometheus-data
+  
+  grafana-data:
+    driver: local
+    name: dguard-grafana-data
+  
+  redis-data:
+    driver: local
+    name: dguard-redis-data
+  
+  nginx-logs:
+    driver: local
+    name: dguard-nginx-logs

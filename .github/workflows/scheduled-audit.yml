@@ -1,0 +1,109 @@
+name: 📅 Scheduled DGuard Audit
+
+on:
+  schedule:
+    # Ejecutar todos los días laborales a las 9 AM UTC
+    - cron: '0 9 * * 1-5'
+  workflow_dispatch:
+
+env:
+  BACKEND_REPO: 'santiagogarcia/DGuardAPI'
+  FRONTEND_REPO: 'santiagogarcia/DGuard'
+  DESIGN_SYSTEM_REPO: 'santiagogarcia/design-system'
+
+jobs:
+  scheduled-audit:
+    name: Auditoría Programada
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout Audit Bot
+      uses: actions/checkout@v4
+    
+    - name: 📥 Checkout Repositories
+      run: |
+        # Clonar repositorios usando GitHub CLI
+        gh repo clone ${{ env.BACKEND_REPO }} projects/backend
+        gh repo clone ${{ env.FRONTEND_REPO }} projects/frontend
+        gh repo clone ${{ env.DESIGN_SYSTEM_REPO }} projects/design-system || echo "Design system repo not available"
+      env:
+        GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+    
+    - name: 🟢 Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+    
+    - name: 📦 Install Dependencies
+      run: npm ci
+    
+    - name: 🤖 Execute Scheduled Audit
+      run: |
+        npm run audit -- \
+          --backend ./projects/backend \
+          --frontend ./projects/frontend \
+          --design-system ./projects/design-system \
+          --format all \
+          --quiet
+    
+    - name: 📊 Generate Weekly Report
+      if: github.event.schedule && contains(github.event.schedule, '1')  # Monday
+      run: |
+        echo "# 📊 Weekly DGuard Audit Report" > weekly-report.md
+        echo "" >> weekly-report.md
+        echo "**Week of:** $(date +'%B %d, %Y')" >> weekly-report.md
+        echo "" >> weekly-report.md
+        
+        # Add summary from current report
+        if [ -f reports/audit-report.json ]; then
+          echo "## Current Status" >> weekly-report.md
+          echo "" >> weekly-report.md
+          
+          CRITICAL=$(jq -r '.summary.issues.critical // 0' reports/audit-report.json)
+          HIGH=$(jq -r '.summary.issues.high // 0' reports/audit-report.json)
+          TOTAL=$(jq -r '.summary.issues.total // 0' reports/audit-report.json)
+          
+          echo "- **Critical Issues:** $CRITICAL" >> weekly-report.md
+          echo "- **High Priority Issues:** $HIGH" >> weekly-report.md
+          echo "- **Total Issues:** $TOTAL" >> weekly-report.md
+          echo "" >> weekly-report.md
+          
+          if [ "$CRITICAL" -gt 0 ]; then
+            echo "### ⚠️ Action Required" >> weekly-report.md
+            echo "Critical issues detected that need immediate attention." >> weekly-report.md
+          elif [ "$HIGH" -gt 0 ]; then
+            echo "### 📝 Attention Needed" >> weekly-report.md
+            echo "High priority issues should be addressed this week." >> weekly-report.md
+          else
+            echo "### ✅ All Good" >> weekly-report.md
+            echo "No critical or high priority issues detected." >> weekly-report.md
+          fi
+        fi
+    
+    - name: 📧 Send Email Report
+      if: always()
+      uses: dawidd6/action-send-mail@v3
+      with:
+        server_address: smtp.gmail.com
+        server_port: 465
+        username: ${{ secrets.EMAIL_USERNAME }}
+        password: ${{ secrets.EMAIL_PASSWORD }}
+        subject: "📊 DGuard Audit Report - $(date +'%Y-%m-%d')"
+        to: team@dguard.com
+        from: DGuard Audit Bot <noreply@dguard.com>
+        body: |
+          DGuard Audit completed successfully.
+          
+          Check the attached reports for detailed results.
+          
+          View full report: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        attachments: reports/audit-report.html,reports/audit-report.json
+      continue-on-error: true
+    
+    - name: 💾 Archive Reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: scheduled-audit-${{ github.run_number }}
+        path: reports/
+        retention-days: 90

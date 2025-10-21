@@ -1,0 +1,238 @@
+name: 🔍 DGuard Ultra Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend_repo:
+        description: 'Backend repository (owner/repo)'
+        required: true
+        default: 'santiagogarcia/DGuardAPI'
+      frontend_repo:
+        description: 'Frontend repository (owner/repo)'
+        required: true
+        default: 'santiagogarcia/DGuard'
+      design_system_repo:
+        description: 'Design System repository (owner/repo)'
+        required: false
+        default: 'santiagogarcia/design-system'
+      fail_on_critical:
+        description: 'Fail build if critical issues found'
+        required: false
+        default: 'true'
+        type: boolean
+
+jobs:
+  audit:
+    name: Ejecutar Auditoría Completa
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout Audit Bot
+      uses: actions/checkout@v4
+    
+    - name: 📥 Checkout Backend Repository
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ github.event.inputs.backend_repo }}
+        path: projects/backend
+        token: ${{ secrets.GH_PAT || github.token }}
+    
+    - name: 📥 Checkout Frontend Repository
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ github.event.inputs.frontend_repo }}
+        path: projects/frontend
+        token: ${{ secrets.GH_PAT || github.token }}
+    
+    - name: 📥 Checkout Design System Repository
+      if: github.event.inputs.design_system_repo != ''
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ github.event.inputs.design_system_repo }}
+        path: projects/design-system
+        token: ${{ secrets.GH_PAT || github.token }}
+        continue-on-error: true
+    
+    - name: 🟢 Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+    
+    - name: 📦 Install Dependencies
+      run: npm ci
+    
+    - name: 🤖 Execute Audit
+      id: audit
+      run: |
+        npm run audit -- \
+          --backend ./projects/backend \
+          --frontend ./projects/frontend \
+          --design-system ./projects/design-system \
+          ${{ github.event.inputs.fail_on_critical == 'true' && '--ci' || '' }} \
+          --format all
+      continue-on-error: true
+    
+    - name: 📊 Upload Audit Reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: dguard-audit-reports-${{ github.run_number }}
+        path: reports/
+        retention-days: 30
+    
+    - name: 📝 Read Audit Results
+      if: always()
+      id: results
+      run: |
+        if [ -f reports/audit-report.json ]; then
+          echo "report_exists=true" >> $GITHUB_OUTPUT
+          
+          # Extract key metrics
+          CRITICAL=$(jq -r '.summary.issues.critical // 0' reports/audit-report.json)
+          HIGH=$(jq -r '.summary.issues.high // 0' reports/audit-report.json)
+          TOTAL=$(jq -r '.summary.issues.total // 0' reports/audit-report.json)
+          ENDPOINTS=$(jq -r '.summary.backend.endpoints // 0' reports/audit-report.json)
+          API_CALLS=$(jq -r '.summary.frontend.apiCalls // 0' reports/audit-report.json)
+          COMPONENTS=$(jq -r '.summary.frontend.components // 0' reports/audit-report.json)
+          
+          echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+          echo "high=$HIGH" >> $GITHUB_OUTPUT
+          echo "total=$TOTAL" >> $GITHUB_OUTPUT
+          echo "endpoints=$ENDPOINTS" >> $GITHUB_OUTPUT
+          echo "api_calls=$API_CALLS" >> $GITHUB_OUTPUT
+          echo "components=$COMPONENTS" >> $GITHUB_OUTPUT
+          
+          # Generate summary for PR comment
+          cat > audit_summary.md << EOF
+          ## 🔍 DGuard Audit Results
+          
+          | Metric | Count |
+          |--------|-------|
+          | Backend Endpoints | $ENDPOINTS |
+          | Frontend API Calls | $API_CALLS |
+          | Frontend Components | $COMPONENTS |
+          | 🔴 Critical Issues | **$CRITICAL** |
+          | 🟠 High Issues | **$HIGH** |
+          | Total Issues | $TOTAL |
+          
+          $(if [ "$CRITICAL" -gt 0 ]; then
+            echo "### ⚠️ Critical Issues Detected"
+            echo ""
+            echo "❌ **$CRITICAL critical issues** require immediate attention!"
+            echo ""
+            jq -r '.issues[] | select(.severity=="CRITICAL") | "- **" + .type + "**: " + .message' reports/audit-report.json | head -5
+            if [ "$CRITICAL" -gt 5 ]; then
+              echo "- ... and $((CRITICAL - 5)) more critical issues"
+            fi
+          elif [ "$HIGH" -gt 0 ]; then
+            echo "### ⚠️ High Priority Issues"
+            echo ""
+            echo "🟠 **$HIGH high priority issues** need attention soon."
+          else
+            echo "### ✅ No Critical Issues"
+            echo ""
+            echo "🎉 Great! No critical or high priority issues found."
+          fi)
+          
+          📄 [Download Full Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          EOF
+          
+        else
+          echo "report_exists=false" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: 💬 Comment on PR
+      if: always() && github.event_name == 'pull_request' && steps.results.outputs.report_exists == 'true'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const summary = fs.readFileSync('audit_summary.md', 'utf8');
+          
+          await github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: summary
+          });
+    
+    - name: 📈 Create Job Summary
+      if: always() && steps.results.outputs.report_exists == 'true'
+      run: |
+        echo "# 🔍 DGuard Audit Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        cat audit_summary.md >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## 📊 Detailed Metrics" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- **Execution Time**: $(jq -r '.performance.totalDuration // "N/A"' reports/audit-report.json)s" >> $GITHUB_STEP_SUMMARY
+        echo "- **Backend Analysis**: $(jq -r '.performance.backendAnalysis // "N/A"' reports/audit-report.json)s" >> $GITHUB_STEP_SUMMARY
+        echo "- **Frontend Analysis**: $(jq -r '.performance.frontendAnalysis // "N/A"' reports/audit-report.json)s" >> $GITHUB_STEP_SUMMARY
+        echo "- **Files Processed**: $(jq -r '(.summary.backend.files // 0) + (.summary.frontend.files // 0)' reports/audit-report.json)" >> $GITHUB_STEP_SUMMARY
+    
+    - name: 🔔 Notify Slack on Failure
+      if: failure() && steps.results.outputs.critical > 0 && secrets.SLACK_WEBHOOK_URL
+      uses: slackapi/slack-github-action@v1
+      with:
+        webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        payload: |
+          {
+            "text": "🚨 DGuard Audit Failed - Critical Issues Detected",
+            "blocks": [
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*DGuard Audit Report*\n❌ Critical issues detected in audit"
+                }
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Critical Issues:*\n${{ steps.results.outputs.critical }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*High Issues:*\n${{ steps.results.outputs.high }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Repository:*\n${{ github.repository }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Workflow:*\n${{ github.workflow }}"
+                  }
+                ]
+              },
+              {
+                "type": "actions",
+                "elements": [
+                  {
+                    "type": "button",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "View Report"
+                    },
+                    "url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                  }
+                ]
+              }
+            ]
+          }
+    
+    - name: ❌ Fail Build on Critical Issues
+      if: always() && github.event.inputs.fail_on_critical == 'true' && steps.results.outputs.critical > 0
+      run: |
+        echo "::error::Audit failed with ${{ steps.results.outputs.critical }} critical issues"
+        echo "Critical issues must be resolved before merging"
+        exit 1
+    
+    - name: ✅ Audit Success
+      if: always() && steps.results.outputs.critical == 0
+      run: |
+        echo "::notice::Audit completed successfully with no critical issues"
+        echo "Total issues found: ${{ steps.results.outputs.total }}"

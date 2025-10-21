@@ -1,0 +1,53 @@
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime files
+*.log
+logs/
+.audit-history/
+.audit-cache/
+reports/
+
+# Development files
+.git/
+.gitignore
+.env
+.env.local
+.env.test
+
+# Documentation
+*.md
+docs/
+examples/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test files
+test/
+tests/
+*.test.js
+*.spec.js
+coverage/
+
+# Build artifacts
+dist/
+build/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+
+# Docker files (we're building with them)
+Dockerfile*
+docker-compose*.yml

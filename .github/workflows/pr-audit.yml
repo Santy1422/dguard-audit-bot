@@ -1,0 +1,348 @@
+name: 🔍 DGuard Audit PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+    branches: [main, develop]
+  push:
+    branches: [main]
+
+env:
+  NODE_VERSION: '18'
+
+jobs:
+  audit:
+    name: DGuard Audit Analysis
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+      
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          
+      - name: 📦 Install dependencies
+        run: |
+          npm ci
+          npm run validate:dependencies
+          
+      - name: 🏥 Health check
+        run: npm run monitor:health
+        
+      - name: 🔑 Configure GitHub token
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_PAT: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          echo "GitHub token configured"
+          echo "Repository: ${{ github.repository }}"
+          echo "PR Number: ${{ github.event.number }}"
+          
+      - name: 📚 Clone target repositories
+        env:
+          GH_PAT: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Attempting to clone DGuard repositories..."
+          npm run validate:github || echo "GitHub validation failed, continuing with local analysis"
+          
+      - name: 🔍 Run DGuard audit
+        env:
+          GH_PAT: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_ENV: production
+        run: |
+          echo "Starting DGuard audit analysis..."
+          npm run audit -- --github --format all --ci || npm run audit -- --format all --ci
+          
+      - name: 📊 Generate audit report
+        run: |
+          echo "Generating comprehensive audit report..."
+          npm run audit:report || echo "Report generation completed with warnings"
+          
+      - name: 📈 Upload audit artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dguard-audit-report-${{ github.sha }}
+          path: |
+            reports/
+            logs/
+          retention-days: 30
+          
+      - name: 🔍 Analyze changed files (PR only)
+        if: github.event_name == 'pull_request'
+        id: changed-files
+        run: |
+          echo "Analyzing changed files in PR..."
+          git diff --name-only origin/${{ github.base_ref }}..HEAD > changed-files.txt
+          cat changed-files.txt
+          echo "changed_files=$(cat changed-files.txt | tr '\n' ' ')" >> $GITHUB_OUTPUT
+          
+      - name: 📝 Create PR comment with audit results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ github.event.number }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            // Read audit report
+            let auditReport = {};
+            try {
+              const reportPath = 'reports/audit-report.json';
+              if (fs.existsSync(reportPath)) {
+                auditReport = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+              }
+            } catch (error) {
+              console.log('Could not read audit report:', error.message);
+            }
+            
+            // Create comment body
+            const createCommentBody = (report) => {
+              const summary = report.summary || {};
+              const issues = summary.issues || {};
+              const performance = report.performance || {};
+              
+              const criticalCount = issues.critical || 0;
+              const highCount = issues.high || 0;
+              const totalIssues = issues.total || 0;
+              
+              // Status emoji and color
+              let statusEmoji = '✅';
+              let statusText = 'PASSED';
+              let alertLevel = '';
+              
+              if (criticalCount > 0) {
+                statusEmoji = '🔴';
+                statusText = 'CRITICAL ISSUES FOUND';
+                alertLevel = '> **⚠️ CRITICAL**: This PR introduces critical security or functionality issues that must be addressed before merging.';
+              } else if (highCount > 0) {
+                statusEmoji = '🟠';
+                statusText = 'HIGH PRIORITY ISSUES';
+                alertLevel = '> **⚠️ WARNING**: This PR has high priority issues that should be reviewed.';
+              } else if (totalIssues > 0) {
+                statusEmoji = '🟡';
+                statusText = 'MINOR ISSUES DETECTED';
+              }
+              
+              return `## ${statusEmoji} DGuard Ultra Audit Results
+            
+            ${alertLevel}
+            
+            ### 📊 Summary
+            
+            | Metric | Value |
+            |--------|-------|
+            | **Overall Status** | ${statusEmoji} ${statusText} |
+            | **Critical Issues** | ${criticalCount} |
+            | **High Priority** | ${highCount} |
+            | **Total Issues** | ${totalIssues} |
+            | **Analysis Duration** | ${performance.totalDuration || 'N/A'}s |
+            
+            ### 🏗️ Project Analysis
+            
+            | Component | Endpoints/Components | Files Analyzed |
+            |-----------|---------------------|----------------|
+            | **Backend** | ${summary.backend?.endpoints || 0} | ${summary.backend?.files || 0} |
+            | **Frontend** | ${summary.frontend?.apiCalls || 0} calls | ${summary.frontend?.files || 0} |
+            | **Design System** | ${summary.designSystem?.components || 0} | ${summary.designSystem?.files || 0} |
+            
+            ### 🔍 Coverage Analysis
+            
+            - **Endpoint Coverage**: ${summary.coverage?.endpoints || 'N/A'}%
+            - **Component Coverage**: ${summary.coverage?.components || 'N/A'}%
+            
+            ${criticalCount > 0 ? `
+            ### 🚨 Critical Issues Requiring Immediate Attention
+            
+            ${(report.issues || [])
+              .filter(issue => issue.severity === 'CRITICAL')
+              .slice(0, 5)
+              .map(issue => `- **${issue.type}**: ${issue.message}`)
+              .join('\n') || 'No details available'}
+            
+            ${(report.issues || []).filter(issue => issue.severity === 'CRITICAL').length > 5 ? 
+              `\n*... and ${(report.issues || []).filter(issue => issue.severity === 'CRITICAL').length - 5} more critical issues*` : ''}
+            ` : ''}
+            
+            ${highCount > 0 ? `
+            ### 🟠 High Priority Issues
+            
+            ${(report.issues || [])
+              .filter(issue => issue.severity === 'HIGH')
+              .slice(0, 3)
+              .map(issue => `- **${issue.type}**: ${issue.message}`)
+              .join('\n') || 'No details available'}
+            
+            ${(report.issues || []).filter(issue => issue.severity === 'HIGH').length > 3 ? 
+              `\n*... and ${(report.issues || []).filter(issue => issue.severity === 'HIGH').length - 3} more high priority issues*` : ''}
+            ` : ''}
+            
+            ### 💡 AI-Powered Suggestions
+            
+            ${(report.suggestions || []).length > 0 ? 
+              (report.suggestions || []).slice(0, 3).map(suggestion => 
+                `- **${suggestion.type}**: ${suggestion.description}`
+              ).join('\n') : 
+              'No optimization suggestions at this time.'}
+            
+            ### 🔧 Quick Actions
+            
+            ${criticalCount > 0 || highCount > 0 ? 
+              '- Run `npm run audit:fix` to auto-fix common issues\n' : ''}
+            - View detailed report: [Download Artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            - Run locally: \`npm run audit\`
+            
+            ### 📈 Trend Analysis
+            
+            This analysis was performed on ${new Date().toLocaleString()} using DGuard Ultra Audit Bot v1.0.0
+            
+            ---
+            
+            <details>
+            <summary>🤖 Technical Details</summary>
+            
+            - **Commit**: ${process.env.GITHUB_SHA?.slice(0, 7) || 'N/A'}
+            - **Workflow**: [${process.env.GITHUB_RUN_ID || 'N/A'}](https://github.com/${{ github.repository }}/actions/runs/${process.env.GITHUB_RUN_ID || ''})
+            - **Analysis Mode**: ${report.github ? 'GitHub Integration' : 'Local Analysis'}
+            - **Cache Hit Rate**: ${report.cache?.hitRate || 'N/A'}
+            
+            </details>
+            `;
+            };
+            
+            // Find existing audit comment
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: process.env.PR_NUMBER
+            });
+            
+            const existingComment = comments.data.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('DGuard Ultra Audit Results')
+            );
+            
+            const commentBody = createCommentBody(auditReport);
+            
+            if (existingComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: commentBody
+              });
+              console.log('Updated existing audit comment');
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: process.env.PR_NUMBER,
+                body: commentBody
+              });
+              console.log('Created new audit comment');
+            }
+            
+      - name: 🔍 Set PR status check
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            
+            let auditReport = {};
+            try {
+              const reportPath = 'reports/audit-report.json';
+              if (fs.existsSync(reportPath)) {
+                auditReport = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+              }
+            } catch (error) {
+              console.log('Could not read audit report for status check');
+            }
+            
+            const issues = auditReport.summary?.issues || {};
+            const criticalCount = issues.critical || 0;
+            const highCount = issues.high || 0;
+            
+            let state = 'success';
+            let description = 'No critical issues detected';
+            
+            if (criticalCount > 0) {
+              state = 'failure';
+              description = `${criticalCount} critical issues must be fixed`;
+            } else if (highCount > 5) {
+              state = 'failure';
+              description = `Too many high priority issues (${highCount})`;
+            } else if (highCount > 0) {
+              state = 'pending';
+              description = `${highCount} high priority issues detected`;
+            }
+            
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.sha,
+              state: state,
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+              description: description,
+              context: 'DGuard Ultra Audit'
+            });
+            
+      - name: 📊 Notify Slack (on failure)
+        if: failure() && (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            npm run notify:slack alert
+          fi
+          
+      - name: 🎯 Auto-fix attempt (if enabled)
+        if: github.event_name == 'pull_request' && contains(github.event.pull_request.body, '[auto-fix]')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Auto-fix requested in PR description"
+          npm run audit:fix --dry-run
+          # Note: Actual auto-fix commits would need additional permissions and setup
+          
+      - name: 📈 Performance monitoring
+        run: |
+          echo "Recording performance metrics..."
+          npm run monitor >> $GITHUB_STEP_SUMMARY
+          
+      - name: ✅ Success summary
+        if: success()
+        run: |
+          echo "## 🎉 DGuard Audit Completed Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The DGuard Ultra Audit has completed analysis of your code." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 Quick Stats" >> $GITHUB_STEP_SUMMARY
+          if [ -f "reports/audit-report.json" ]; then
+            echo "- Analysis Duration: $(jq -r '.performance.totalDuration // "N/A"' reports/audit-report.json)s" >> $GITHUB_STEP_SUMMARY
+            echo "- Total Issues: $(jq -r '.summary.issues.total // 0' reports/audit-report.json)" >> $GITHUB_STEP_SUMMARY
+            echo "- Critical Issues: $(jq -r '.summary.issues.critical // 0' reports/audit-report.json)" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔗 Resources" >> $GITHUB_STEP_SUMMARY
+          echo "- [Download Full Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+          echo "- [View Workflow](https://github.com/${{ github.repository }}/actions)" >> $GITHUB_STEP_SUMMARY
